@@ -9,6 +9,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', type=str, required=True, help='Input video path')
     parser.add_argument('--output', type=str, default='output_bev.mp4', help='Output video path')
+    parser.add_argument('--margin-x', type=int, default=0, help='Offset for BEV view horizontal')
+    parser.add_argument('--margin-y', type=int, default=0, help='Offset for BEV view vertical')
     args = parser.parse_args()
 
     # 파라미터 로드
@@ -23,7 +25,22 @@ def main():
         return
 
     params = np.load(param_path)
-    M = cv2.getPerspectiveTransform(params['src_points'], params['dst_points'])
+    
+    # 원본 dst_points 로드
+    dst_points = params['dst_points']
+
+    # 마진 적용
+    margin_x = args.margin_x
+    margin_y = args.margin_y
+    
+    dst_points_with_margin = np.float32([
+        [0 + margin_x, params['warp_h'] - margin_y], # 좌하
+        [params['warp_w'] - margin_x, params['warp_h'] - margin_y], # 우하
+        [0 + margin_x, 0 + margin_y], # 좌상
+        [params['warp_w'] - margin_x, 0 + margin_y]  # 우상
+    ])
+    
+    M = cv2.getPerspectiveTransform(params['src_points'], dst_points_with_margin)
     h, w = int(params['warp_h']), int(params['warp_w'])
 
     cap = cv2.VideoCapture(args.source)
