@@ -4,6 +4,14 @@
 import sys
 import os
 import glob
+
+# [1] Conda 환경 라이브러리 경로 우선순위 설정 (NumPy 충돌 방지)
+if 'CONDA_PREFIX' in os.environ:
+    conda_site = glob.glob(os.path.join(os.environ['CONDA_PREFIX'], 'lib', 'python*', 'site-packages'))
+    if conda_site: 
+        sys.path.insert(0, conda_site[0])
+        print(f"[System] Conda path added: {conda_site[0]}")
+
 import numpy as np
 import cv2
 import torch
@@ -12,18 +20,16 @@ from math import atan2, degrees, sqrt
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32, Bool
 from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
 
-# Conda 라이브러리 경로 설정
-if 'CONDA_PREFIX' in os.environ:
-    conda_site = glob.glob(os.path.join(os.environ['CONDA_PREFIX'], 'lib', 'python*', 'site-packages'))
-    if conda_site: sys.path.insert(0, conda_site[0])
+# [핵심] CvBridge 사용 안 함 (NumPy 버전 충돌 원천 봉쇄)
 
 # ==============================================================================
-# 유틸리티 함수 (ROS 1 코드 100% 동일)
+# 유틸리티 함수
 # ==============================================================================
 def polyfit_lane(points_y, points_x, order=2):
     if len(points_y) < 5: return None
@@ -78,7 +84,7 @@ class LaneFollowerNode(Node):
     def __init__(self, opt):
         super().__init__('lane_follower_node')
         self.opt = opt
-        self.get_logger().info("[Lane Follower] Initializing with Resize Correction...")
+        self.get_logger().info("[Lane Follower] Initializing...")
 
         # 1. 모델 로드
         device_str = self.opt.device
@@ -87,30 +93,19 @@ class LaneFollowerNode(Node):
         else:
             self.device = torch.device('cpu')
         
-        try:
-            pkg_share = get_package_share_directory('yolotl_ros2')
-            weights_path = os.path.join(pkg_share, 'config', opt.weights)
-            param_path = os.path.join(pkg_share, 'config', opt.param_file)
-            if not os.path.exists(weights_path): weights_path = opt.weights
-            if not os.path.exists(param_path): param_path = opt.param_file
-        except:
-            weights_path, param_path = opt.weights, opt.param_file
+        self.get_logger().info(f"Loading weights from: {opt.weights}")
+        self.model = YOLO(opt.weights).to(self.device)
 
-        self.model = YOLO(weights_path).to(self.device)
-
-        # 2. BEV 파라미터 로드 및 해상도 동적 스케일링 준비
+        # 2. BEV 파라미터 로드
+        self.get_logger().info(f"Loading params from: {opt.param_file}")
         try:
-            params = np.load(param_path)
-            # BEV 좌표가 보정된 원본 해상도(640x480)를 저장합니다.
-            self.calib_width = 640.0
-            self.calib_height = 480.0
-            # 원본 좌표를 float32 형태로 저장해 스케일링 연산에 사용합니다.
-            self.original_src_points = np.copy(params['src_points']).astype(np.float32)
-            self.dst_points = np.copy(params['dst_points']).astype(np.float32)
-            
+            params = np.load(opt.param_file)
+            self.bev_params = {'src_points': params['src_points'], 'dst_points': params['dst_points']}
             self.bev_w, self.bev_h = int(params['warp_w']), int(params['warp_h'])
+            self.get_logger().info(f"[SUCCESS] Loaded Params: BEV Size={self.bev_w}x{self.bev_h}")
         except Exception as e:
-            self.get_logger().error(f"Failed to load BEV params: {e}")
+            self.get_logger().error(f"[FATAL] Failed to load BEV params: {e}")
+            self.get_logger().error(f"Check file path: {opt.param_file}")
             sys.exit(1)
 
         # 3. 주행 파라미터
@@ -127,25 +122,29 @@ class LaneFollowerNode(Node):
         # 4. ROS Setup
         self.pub_steering = self.create_publisher(Float32, 'auto_steer_angle_lane', 1)
         self.pub_lane_status = self.create_publisher(Bool, 'lane_detection_status', 1)
-        self.sub_image = self.create_subscription(Image, '/usb_cam/image_raw', self.image_callback, 1)
+        
+        # [통신] QoS 설정 적용 (카메라 연결 문제 해결)
+        self.sub_image = self.create_subscription(
+            Image, 
+            '/usb_cam/image_raw', 
+            self.image_callback, 
+            qos_profile_sensor_data
+        )
         self.sub_throttle = self.create_subscription(Float32, 'auto_throttle', self.throttle_callback, 1)
 
-        self.has_logged_image_size = False
+        # [시각화] 창 크기 자동 조절 (여백 제거)
+        cv2.namedWindow("Original Camera View", cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow("Roboflow Detections (on BEV)", cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow("Final Path & Logs (on BEV)", cv2.WINDOW_AUTOSIZE)
+
+        self.frame_count = 0
 
     def throttle_callback(self, msg):
         self.current_throttle = np.clip(msg.data, self.THROTTLE_MIN, self.THROTTLE_MAX)
 
     def do_bev_transform(self, image):
-        # 현재 이미지 해상도에 맞춰 원본 src_points를 동적으로 스케일링합니다.
-        img_h, img_w = image.shape[:2]
-        x_scale = img_w / self.calib_width
-        y_scale = img_h / self.calib_height
-
-        scaled_src_points = np.copy(self.original_src_points)
-        scaled_src_points[:, 0] *= x_scale
-        scaled_src_points[:, 1] *= y_scale
-
-        M = cv2.getPerspectiveTransform(scaled_src_points, self.dst_points)
+        # 파라미터 파일에 저장된 좌표 그대로 변환 (고해상도 대응)
+        M = cv2.getPerspectiveTransform(self.bev_params['src_points'], self.bev_params['dst_points'])
         return cv2.warpPerspective(image, M, (self.bev_w, self.bev_h), flags=cv2.INTER_LINEAR)
 
     def image_to_vehicle(self, pt_bev):
@@ -155,38 +154,56 @@ class LaneFollowerNode(Node):
         return x_vehicle, y_vehicle
 
     def image_callback(self, msg):
-        if not self.has_logged_image_size:
-            self.get_logger().info(f"Image received with size: {msg.width}x{msg.height}")
-            self.has_logged_image_size = True
+        self.frame_count += 1
+        if self.frame_count % 60 == 0:
+            self.get_logger().info(f"[Alive] Image Size: {msg.width}x{msg.height}")
+
         try:
+            # [변환] CvBridge 대신 NumPy 수동 변환 (NumPy 2.x 충돌 방지)
             np_arr = np.frombuffer(msg.data, dtype=np.uint8)
+            
+            # YUYV (2 bytes/pixel)
             if np_arr.size == (msg.width * msg.height * 2): 
                 img = cv2.cvtColor(np_arr.reshape((msg.height, msg.width, 2)), cv2.COLOR_YUV2BGR_YUYV)
+            
+            # RGB8/BGR8 (3 bytes/pixel)
             elif np_arr.size == (msg.width * msg.height * 3):
                 img = np_arr.reshape((msg.height, msg.width, 3))
-                if 'rgb' in msg.encoding.lower(): img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            else: return
+                if 'rgb' in msg.encoding.lower(): 
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            
+            # 기타 (Compressed MJPEG 등)
+            else:
+                img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            
+            if img is None: return
 
-            # 동적 스케일링을 사용하므로 원본 이미지를 그대로 전달합니다.
+            # [중요] Resize 없음! 원본 해상도 그대로 사용
             self.process_image(np.ascontiguousarray(img))
+
         except Exception as e:
-            self.get_logger().error(f"Img Error: {e}")
+            self.get_logger().error(f"Manual Decode Error: {e}")
 
     def process_image(self, im0s):
-        # [변수 초기화]
+        # 변수 안전 초기화
         steer_deg = None
         goal_point_bev = None
         final_left_coeff = None
         final_right_coeff = None
         lane_detected_bool = False
+        
+        # 화면 초기화 (plot 실패 대비)
+        annotated_frame = im0s.copy() 
 
-        # 1. BEV Transform & Inference
+        # 1. BEV Transform
         bev_image_input = self.do_bev_transform(im0s)
+        
+        # 2. Inference
         results = self.model(bev_image_input, imgsz=self.opt.img_size, conf=self.opt.conf_thres, 
                             iou=self.opt.iou_thres, device=self.device, verbose=False)
         result = results[0]
 
-        # 2. Mask Processing
+        # 3. Mask Processing
         combined_mask_bev = np.zeros(result.orig_shape[:2], dtype=np.uint8)
         if result.masks is not None:
             confidences = result.boxes.conf
@@ -200,7 +217,7 @@ class LaneFollowerNode(Node):
         final_mask = final_filter(combined_mask_bev)
         bev_im_for_drawing = bev_image_input.copy()
 
-        # 3. Extract Candidates
+        # 4. Lane Extraction
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(final_mask, connectivity=8)
         current_detections = []
         if num_labels > 1:
@@ -213,7 +230,7 @@ class LaneFollowerNode(Node):
                         current_detections.append({'coeff': coeff, 'x_bottom': x_at_bottom})
         current_detections.sort(key=lambda c: c['x_bottom'])
 
-        # 4. Lane Tracking
+        # 5. Tracking
         left_lane_tracked = self.tracked_lanes['left']
         right_lane_tracked = self.tracked_lanes['right']
         current_left, current_right = None, None
@@ -251,7 +268,7 @@ class LaneFollowerNode(Node):
         lane_detected_bool = (final_left_coeff is not None) or (final_right_coeff is not None)
         self.pub_lane_status.publish(Bool(data=lane_detected_bool))
 
-        # 5. Pure Pursuit
+        # 6. Steering
         if lane_detected_bool:
             center_points = []
             LANE_WIDTH_M = 1.5
@@ -293,10 +310,11 @@ class LaneFollowerNode(Node):
                         self.pub_steering.publish(Float32(data=steer_deg))
                         break
 
-        # ==============================================================================
-        # 6. Visualization (사용자 제공 코드 적용 + 검은 여백 해결)
-        # ==============================================================================
-        annotated_bev = result.plot(img=bev_image_input.copy())
+        # 7. Visualization
+        try:
+            annotated_frame = result.plot()
+        except:
+            pass 
         
         overlay_polyline(bev_im_for_drawing, final_left_coeff, color=(255, 0, 0), step=2, thickness=2)
         overlay_polyline(bev_im_for_drawing, final_right_coeff, color=(0, 0, 255), step=2, thickness=2)
@@ -316,17 +334,22 @@ class LaneFollowerNode(Node):
         cv2.putText(bev_im_for_drawing, f"Lookahead: {viz_lookahead:.2f}m", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.putText(bev_im_for_drawing, f"Throttle: {self.current_throttle:.2f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-        # [Display]
         cv2.imshow("Original Camera View", im0s)
-        cv2.imshow("Roboflow Detections (on BEV)", annotated_bev)
+        cv2.imshow("Roboflow Detections (on BEV)", annotated_frame)
         cv2.imshow("Final Path & Logs (on BEV)", bev_im_for_drawing)
         cv2.waitKey(1)
 
 def main(args=None):
     rclpy.init(args=args)
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', default='weights2.pt')
-    parser.add_argument('--param-file', default='bev_params_y_5.npz')
+    
+    # [★경로 고정★] 사용자님 로그에 찍힌 경로 그대로 박아넣음
+    # 이렇게 하면 옵션 없이 실행해도 무조건 이 파일들을 읽습니다.
+    default_weights = '/home/j/yolotl/src/yolotl_ros2/config/weights2.pt'
+    default_params = '/home/j/yolotl/src/yolotl_ros2/yolotl_ros2/bev_params_manual.npz'
+
+    parser.add_argument('--weights', default=default_weights)
+    parser.add_argument('--param-file', default=default_params)
     parser.add_argument('--img-size', type=int, default=640)
     parser.add_argument('--conf-thres', type=float, default=0.6)
     parser.add_argument('--iou-thres', type=float, default=0.5)
