@@ -15,6 +15,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32, Bool
+from rclpy.qos import qos_profile_sensor_data
 from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
 
@@ -122,7 +123,7 @@ class LaneFollowerNode(Node):
         # 4. ROS Setup
         self.pub_steering = self.create_publisher(Float32, 'auto_steer_angle_lane', 1)
         self.pub_lane_status = self.create_publisher(Bool, 'lane_detection_status', 1)
-        self.sub_image = self.create_subscription(Image, '/usb_cam/image_raw', self.image_callback, 1)
+        self.sub_image = self.create_subscription(Image, self.opt.topic, self.image_callback, qos_profile_sensor_data)
         self.sub_throttle = self.create_subscription(Float32, 'auto_throttle', self.throttle_callback, 1)
 
         # 창 크기 자동 조절 (여백 제거)
@@ -323,6 +324,7 @@ def main(args=None):
     parser.add_argument('--conf-thres', type=float, default=0.6)
     parser.add_argument('--iou-thres', type=float, default=0.5)
     parser.add_argument('--device', default='0')
+    parser.add_argument('--topic', type=str, default='/usb_cam/image_raw', help='ROS 2 Image Topic')
     opt, _ = parser.parse_known_args()
     
     node = LaneFollowerNode(opt)

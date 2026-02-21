@@ -1,0 +1,7 @@
+[console_scripts]
+basic_follower = yolotl_ros2.basic_result:ros_main
+bev_video_creator = yolotl_ros2.create_bev_video:main
+dual_recorder = yolotl_ros2.create_realtime_bev_video_dual_record:main
+lane_follower = yolotl_ros2.demo_with_ros2:main
+local_demo = yolotl_ros2.demo:main
+

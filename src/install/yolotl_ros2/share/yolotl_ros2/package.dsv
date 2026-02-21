@@ -1,0 +1,9 @@
+source;share/yolotl_ros2/hook/pythonpath.ps1
+source;share/yolotl_ros2/hook/pythonpath.dsv
+source;share/yolotl_ros2/hook/pythonpath.sh
+source;share/yolotl_ros2/hook/ament_prefix_path.ps1
+source;share/yolotl_ros2/hook/ament_prefix_path.dsv
+source;share/yolotl_ros2/hook/ament_prefix_path.sh
+source;../../build/yolotl_ros2/share/yolotl_ros2/hook/pythonpath_develop.ps1
+source;../../build/yolotl_ros2/share/yolotl_ros2/hook/pythonpath_develop.dsv
+source;../../build/yolotl_ros2/share/yolotl_ros2/hook/pythonpath_develop.sh

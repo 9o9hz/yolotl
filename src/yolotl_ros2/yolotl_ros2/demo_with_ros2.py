@@ -21,8 +21,10 @@ from math import atan2, degrees, sqrt
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from std_msgs.msg import Float32, Bool
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
 from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
 
@@ -122,11 +124,18 @@ class LaneFollowerNode(Node):
         # 4. ROS Setup
         self.pub_steering = self.create_publisher(Float32, 'auto_steer_angle_lane', 1)
         self.pub_lane_status = self.create_publisher(Bool, 'lane_detection_status', 1)
+        self.pub_path = self.create_publisher(Path, 'lane_path', 10)
+        self.pub_drivable_area = self.create_publisher(CompressedImage, 'drivable_area', 10)
         
         # [통신] QoS 설정 적용 (카메라 연결 문제 해결)
+        if 'compressed' in self.opt.topic:
+            self.msg_type = CompressedImage
+        else:
+            self.msg_type = Image
+
         self.sub_image = self.create_subscription(
-            Image, 
-            '/usb_cam/image_raw', 
+            self.msg_type, 
+            self.opt.topic, 
             self.image_callback, 
             qos_profile_sensor_data
         )
@@ -147,6 +156,62 @@ class LaneFollowerNode(Node):
         M = cv2.getPerspectiveTransform(self.bev_params['src_points'], self.bev_params['dst_points'])
         return cv2.warpPerspective(image, M, (self.bev_w, self.bev_h), flags=cv2.INTER_LINEAR)
 
+    def draw_lanes_on_original(self, image, left_coeff, right_coeff, center_coeff):
+        # 역변환 행렬 (dst -> src)
+        M_inv = cv2.getPerspectiveTransform(self.bev_params['dst_points'], self.bev_params['src_points'])
+        draw_img = image.copy()
+
+        # [수정] 주행 영역(Drivable Area) 시각화 (단일 차선 보정 포함)
+        LANE_WIDTH_M = 1.5
+        lane_width_pixels = LANE_WIDTH_M / self.m_per_pixel_x
+
+        viz_left = left_coeff
+        viz_right = right_coeff
+
+        if left_coeff is not None and right_coeff is None:
+            viz_right = left_coeff.copy()
+            viz_right[-1] += lane_width_pixels
+        elif right_coeff is not None and left_coeff is None:
+            viz_left = right_coeff.copy()
+            viz_left[-1] -= lane_width_pixels
+
+        if viz_left is not None and viz_right is not None:
+            ys = np.linspace(0, self.bev_h - 1, num=100)
+            left_xs = np.polyval(viz_left, ys)
+            right_xs = np.polyval(viz_right, ys)
+
+            # BEV 좌표계에서 폴리곤 구성 (왼쪽 라인 -> 오른쪽 라인 역순)
+            pts_left = np.stack([left_xs, ys], axis=1)
+            pts_right = np.stack([right_xs, ys], axis=1)
+            pts_bev = np.vstack([pts_left, pts_right[::-1]])
+
+            # 원본 이미지 좌표계로 변환
+            pts_bev = np.array([pts_bev], dtype=np.float32)
+            pts_orig = cv2.perspectiveTransform(pts_bev, M_inv)
+
+            # 반투명 오버레이 (초록색)
+            overlay = draw_img.copy()
+            cv2.fillPoly(overlay, [np.int32(pts_orig)], (0, 255, 0))
+            cv2.addWeighted(overlay, 0.3, draw_img, 0.7, 0, draw_img)
+
+        def transform_and_draw(coeff, color):
+            if coeff is None: return
+            # BEV 상의 y좌표들 (0 ~ bev_h)
+            ys = np.linspace(0, self.bev_h - 1, num=100)
+            xs = np.polyval(coeff, ys)
+            
+            # (1, N, 2) 형태의 점들
+            pts_bev = np.array([np.stack([xs, ys], axis=1)], dtype=np.float32)
+            pts_orig = cv2.perspectiveTransform(pts_bev, M_inv)
+            
+            # pts_orig[0]는 (N, 2) 형태
+            cv2.polylines(draw_img, [np.int32(pts_orig)[0]], False, color, 3)
+
+        transform_and_draw(left_coeff, (255, 0, 0))   # Blue
+        transform_and_draw(right_coeff, (0, 0, 255))  # Red
+        transform_and_draw(center_coeff, (0, 255, 0)) # Green
+        return draw_img
+
     def image_to_vehicle(self, pt_bev):
         u, v = pt_bev
         x_vehicle = (self.bev_h - v) * self.m_per_pixel_y + self.y_offset_m
@@ -156,24 +221,29 @@ class LaneFollowerNode(Node):
     def image_callback(self, msg):
         self.frame_count += 1
         if self.frame_count % 60 == 0:
-            self.get_logger().info(f"[Alive] Image Size: {msg.width}x{msg.height}")
+            if self.msg_type == Image:
+                self.get_logger().info(f"[Alive] Image Size: {msg.width}x{msg.height}")
+            else:
+                self.get_logger().info(f"[Alive] Compressed Image Received")
 
         try:
             # [변환] CvBridge 대신 NumPy 수동 변환 (NumPy 2.x 충돌 방지)
             np_arr = np.frombuffer(msg.data, dtype=np.uint8)
             
-            # YUYV (2 bytes/pixel)
-            if np_arr.size == (msg.width * msg.height * 2): 
-                img = cv2.cvtColor(np_arr.reshape((msg.height, msg.width, 2)), cv2.COLOR_YUV2BGR_YUYV)
-            
-            # RGB8/BGR8 (3 bytes/pixel)
-            elif np_arr.size == (msg.width * msg.height * 3):
-                img = np_arr.reshape((msg.height, msg.width, 3))
-                if 'rgb' in msg.encoding.lower(): 
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            
-            # 기타 (Compressed MJPEG 등)
+            if self.msg_type == Image:
+                # YUYV (2 bytes/pixel)
+                if np_arr.size == (msg.width * msg.height * 2): 
+                    img = cv2.cvtColor(np_arr.reshape((msg.height, msg.width, 2)), cv2.COLOR_YUV2BGR_YUYV)
+                
+                # RGB8/BGR8 (3 bytes/pixel)
+                elif np_arr.size == (msg.width * msg.height * 3):
+                    img = np_arr.reshape((msg.height, msg.width, 3))
+                    if 'rgb' in msg.encoding.lower(): 
+                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                else:
+                    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             else:
+                # CompressedImage
                 img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             
             if img is None: return
@@ -295,6 +365,25 @@ class LaneFollowerNode(Node):
             
             if self.tracked_center_path['coeff'] is not None:
                 final_center_coeff = self.tracked_center_path['coeff']
+
+                # [Path Publishing]
+                path_msg = Path()
+                path_msg.header.frame_id = "base_link"
+                path_msg.header.stamp = self.get_clock().now().to_msg()
+                
+                for y_bev in range(self.bev_h - 1, 0, -20):
+                    x_bev = np.polyval(final_center_coeff, y_bev)
+                    x_veh, y_veh = self.image_to_vehicle((x_bev, y_bev))
+                    
+                    pose = PoseStamped()
+                    pose.header = path_msg.header
+                    pose.pose.position.x = float(x_veh)
+                    pose.pose.position.y = float(y_veh)
+                    pose.pose.position.z = 0.0
+                    pose.pose.orientation.w = 1.0
+                    path_msg.poses.append(pose)
+                self.pub_path.publish(path_msg)
+
                 throttle_range = self.THROTTLE_MAX - self.THROTTLE_MIN
                 normalized_throttle = (self.current_throttle - self.THROTTLE_MIN) / throttle_range if throttle_range > 0 else 0.0
                 dynamic_lookahead_distance = self.MIN_LOOKAHEAD_DISTANCE + (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * normalized_throttle
@@ -334,7 +423,20 @@ class LaneFollowerNode(Node):
         cv2.putText(bev_im_for_drawing, f"Lookahead: {viz_lookahead:.2f}m", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.putText(bev_im_for_drawing, f"Throttle: {self.current_throttle:.2f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-        cv2.imshow("Original Camera View", im0s)
+        # 원본 화면에 역변환된 차선 표시
+        original_with_lanes = self.draw_lanes_on_original(im0s, final_left_coeff, final_right_coeff, self.tracked_center_path['coeff'])
+        
+        # [Publish] 주행 가능 영역 이미지 발행
+        msg = CompressedImage()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "base_link"
+        msg.format = "jpeg"
+        success, encoded_img = cv2.imencode('.jpg', original_with_lanes)
+        if success:
+            msg.data = encoded_img.tobytes()
+            self.pub_drivable_area.publish(msg)
+
+        cv2.imshow("Original Camera View", original_with_lanes)
         cv2.imshow("Roboflow Detections (on BEV)", annotated_frame)
         cv2.imshow("Final Path & Logs (on BEV)", bev_im_for_drawing)
         cv2.waitKey(1)
@@ -343,17 +445,20 @@ def main(args=None):
     rclpy.init(args=args)
     parser = argparse.ArgumentParser()
     
-    # [★경로 고정★] 사용자님 로그에 찍힌 경로 그대로 박아넣음
-    # 이렇게 하면 옵션 없이 실행해도 무조건 이 파일들을 읽습니다.
-    default_weights = '/home/j/yolotl/src/yolotl_ros2/config/weights2.pt'
-    default_params = '/home/j/yolotl/src/yolotl_ros2/yolotl_ros2/bev_params_manual.npz'
-
-    parser.add_argument('--weights', default=default_weights)
-    parser.add_argument('--param-file', default=default_params)
+    # [수정] ROS2 패키지 공유 디렉토리에서 파일 경로를 동적으로 찾도록 수정
+    package_share_directory = get_package_share_directory('yolotl_ros2')
+    default_weights = os.path.join(package_share_directory, 'config', 'weights3.pt')
+    # 만약 config 폴더에 넣은 파일 이름이 'bev_params_manual.npz' 라면:
+    default_params = os.path.join(package_share_directory, 'config', 'bev_params_manual.npz')
+    
+    # 사용자가 직접 경로를 지정할 수 있도록 옵션은 유지
+    parser.add_argument('--weights', default=default_weights, help='Path to model weights')
+    parser.add_argument('--param-file', default=default_params, help='Path to BEV parameters file')
     parser.add_argument('--img-size', type=int, default=640)
     parser.add_argument('--conf-thres', type=float, default=0.6)
     parser.add_argument('--iou-thres', type=float, default=0.5)
     parser.add_argument('--device', default='0')
+    parser.add_argument('--topic', type=str, default='/image_raw/compressed', help='ROS 2 Image Topic')
     opt, _ = parser.parse_known_args()
     
     node = LaneFollowerNode(opt)

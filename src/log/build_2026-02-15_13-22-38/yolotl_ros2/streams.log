@@ -1,0 +1,31 @@
+[0.398s] Invoking command in '/home/j/yolotl/src/build/yolotl_ros2': CONDA_PROMPT_MODIFIER=(jeju) PYTHONPATH=/home/j/yolotl/src/build/yolotl_ros2/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/j/yolotl/src/install/yolotl_ros2/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/j/yolotl/src/build/yolotl_ros2/build --no-deps symlink_data
+[0.553s] running develop
+[0.627s] running egg_info
+[0.627s] creating yolotl_ros2.egg-info
+[0.627s] writing yolotl_ros2.egg-info/PKG-INFO
+[0.627s] writing dependency_links to yolotl_ros2.egg-info/dependency_links.txt
+[0.628s] writing entry points to yolotl_ros2.egg-info/entry_points.txt
+[0.628s] writing requirements to yolotl_ros2.egg-info/requires.txt
+[0.628s] writing top-level names to yolotl_ros2.egg-info/top_level.txt
+[0.628s] writing manifest file 'yolotl_ros2.egg-info/SOURCES.txt'
+[0.629s] reading manifest file 'yolotl_ros2.egg-info/SOURCES.txt'
+[0.630s] writing manifest file 'yolotl_ros2.egg-info/SOURCES.txt'
+[0.630s] running build_ext
+[0.631s] Creating /home/j/yolotl/src/install/yolotl_ros2/lib/python3.10/site-packages/yolotl-ros2.egg-link (link to .)
+[0.631s] Installing basic_follower script to /home/j/yolotl/src/install/yolotl_ros2/lib/yolotl_ros2
+[0.631s] Installing bev_video_creator script to /home/j/yolotl/src/install/yolotl_ros2/lib/yolotl_ros2
+[0.631s] Installing dual_recorder script to /home/j/yolotl/src/install/yolotl_ros2/lib/yolotl_ros2
+[0.631s] Installing lane_follower script to /home/j/yolotl/src/install/yolotl_ros2/lib/yolotl_ros2
+[0.631s] Installing local_demo script to /home/j/yolotl/src/install/yolotl_ros2/lib/yolotl_ros2
+[0.631s] 
+[0.631s] Installed /home/j/yolotl/src/build/yolotl_ros2
+[0.632s] running symlink_data
+[0.632s] creating /home/j/yolotl/src/install/yolotl_ros2/share/ament_index
+[0.632s] creating /home/j/yolotl/src/install/yolotl_ros2/share/ament_index/resource_index
+[0.632s] creating /home/j/yolotl/src/install/yolotl_ros2/share/ament_index/resource_index/packages
+[0.632s] symbolically linking /home/j/yolotl/src/build/yolotl_ros2/resource/yolotl_ros2 -> /home/j/yolotl/src/install/yolotl_ros2/share/ament_index/resource_index/packages
+[0.632s] symbolically linking /home/j/yolotl/src/build/yolotl_ros2/package.xml -> /home/j/yolotl/src/install/yolotl_ros2/share/yolotl_ros2
+[0.632s] creating /home/j/yolotl/src/install/yolotl_ros2/share/yolotl_ros2/config
+[0.632s] symbolically linking /home/j/yolotl/src/build/yolotl_ros2/config/bev_params_y_5.npz -> /home/j/yolotl/src/install/yolotl_ros2/share/yolotl_ros2/config
+[0.632s] symbolically linking /home/j/yolotl/src/build/yolotl_ros2/config/weights2.pt -> /home/j/yolotl/src/install/yolotl_ros2/share/yolotl_ros2/config
+[0.659s] Invoked command in '/home/j/yolotl/src/build/yolotl_ros2' returned '0': CONDA_PROMPT_MODIFIER=(jeju) PYTHONPATH=/home/j/yolotl/src/build/yolotl_ros2/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/j/yolotl/src/install/yolotl_ros2/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/j/yolotl/src/build/yolotl_ros2/build --no-deps symlink_data
