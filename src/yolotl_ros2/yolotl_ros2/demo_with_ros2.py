@@ -121,7 +121,7 @@ class LaneFollowerNode(Node):
 
         # [디벨롭 적용] 동적 LD 및 조향각 제한 관련 파라미터
         self.MIN_LOOKAHEAD_DISTANCE = 1.0  # 직진 시 사용할 최소 LD
-        self.MAX_LOOKAHEAD_DISTANCE = 2.5  # 최대 커브 시 사용할 최대 LD
+        self.MAX_LOOKAHEAD_DISTANCE = 2.0  # 최대 커브 시 사용할 최대 LD
         self.MAX_STEER_DEG = 25.0          # 최대 조향각 제한 (도 단위)
         self.prev_steer_deg = 0.0          # 이전 프레임 조향각 저장 변수
 
@@ -410,14 +410,19 @@ class LaneFollowerNode(Node):
             cv2.circle(bev_im_for_drawing, goal_point_bev, 10, (0, 255, 255), -1)
 
         # ====================================================================
-        # [디벨롭 적용 완료] LD 반경 시각화 (BEV 화면 하단 중앙 기준 반원)
+        # [디벨롭 적용 완료] LD 반경 시각화 (BEV 화면 밖 실제 차량 위치 기준 타원)
         # ====================================================================
         if lane_detected_bool:
-            origin_pt = (int(self.bev_w / 2), self.bev_h - 1) # 차량 중심 위치
-            # 미터 단위 거리를 픽셀 단위 반경으로 변환
-            radius_px = int(dynamic_lookahead_distance / self.m_per_pixel_y)
-            # 조향에 따라 크기가 변하는 하얀색 원 시각화
-            cv2.circle(bev_im_for_drawing, origin_pt, radius_px, (255, 255, 255), 2)
+            # 1. 실제 차량의 기준점은 화면 맨 아래보다 y_offset_m 만큼 뒤에 있음
+            y_offset_px = int(self.y_offset_m / self.m_per_pixel_y)
+            true_origin_pt = (int(self.bev_w / 2), self.bev_h - 1 + y_offset_px)
+            
+            # 2. X축과 Y축의 픽셀 스케일이 다르므로 타원(Ellipse)으로 계산해야 교차함
+            radius_x_px = int(dynamic_lookahead_distance / self.m_per_pixel_x)
+            radius_y_px = int(dynamic_lookahead_distance / self.m_per_pixel_y)
+            
+            # 3. 조향에 따라 크기가 변하는 하얀색 타원 궤적 시각화
+            cv2.ellipse(bev_im_for_drawing, true_origin_pt, (radius_x_px, radius_y_px), 0, 0, 360, (255, 255, 255), 2)
 
         steer_text = f"Steer: {steer_deg:.1f} deg" if steer_deg is not None else "Steer: N/A"
         cv2.putText(bev_im_for_drawing, steer_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
@@ -451,7 +456,7 @@ def main(args=None):
     
     package_share_directory = get_package_share_directory('yolotl_ros2')
     default_weights = os.path.join(package_share_directory, 'config', 'weights3.pt')
-    default_params = os.path.join(package_share_directory, 'config', 'bev_params_4.npz')
+    default_params = os.path.join(package_share_directory, 'config', 'bev_params_7.npz')
     
     parser.add_argument('--weights', default=default_weights, help='Path to model weights')
     parser.add_argument('--param-file', default=default_params, help='Path to BEV parameters file')
