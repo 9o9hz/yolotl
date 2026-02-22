@@ -445,7 +445,7 @@ def main(args=None):
     rclpy.init(args=args)
     parser = argparse.ArgumentParser()
     
-    # [수정] ROS2 패키지 공유 디렉토리에서 파일 경로를 동적으로 찾도록 수정
+   
     package_share_directory = get_package_share_directory('yolotl_ros2')
     default_weights = os.path.join(package_share_directory, 'config', 'weights3.pt')
     # 만약 config 폴더에 넣은 파일 이름이 'bev_params_manual.npz' 라면:
