@@ -120,8 +120,8 @@ class LaneFollowerNode(Node):
         self.current_throttle = self.THROTTLE_MIN
 
         # [디벨롭 적용] 동적 LD 및 조향각 제한 관련 파라미터
-        self.MIN_LOOKAHEAD_DISTANCE = 1.0  # 직진 시 사용할 최소 LD
-        self.MAX_LOOKAHEAD_DISTANCE = 2.0  # 최대 커브 시 사용할 최대 LD
+        self.MIN_LOOKAHEAD_DISTANCE = 1.0  # 최대 커브 시 사용할 최소 LD
+        self.MAX_LOOKAHEAD_DISTANCE = 2.0  # 직진 시 사용할 최대 LD
         self.MAX_STEER_DEG = 25.0          # 최대 조향각 제한 (도 단위)
         self.prev_steer_deg = 0.0          # 이전 프레임 조향각 저장 변수
 
@@ -374,8 +374,8 @@ class LaneFollowerNode(Node):
                 # 1. 이전 프레임 조향각 절댓값을 0.0(직진) ~ 1.0(최대 조향) 비율로 변환
                 normalized_steer = min(abs(self.prev_steer_deg) / self.MAX_STEER_DEG, 1.0)
                 
-                # 2. 직진일수록(0.0) 작게, 조향각이 클수록(1.0) 크게 계산 (요청사항 반영)
-                dynamic_lookahead_distance = self.MIN_LOOKAHEAD_DISTANCE + (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * normalized_steer
+                # 2. 직진일수록(0.0) 멀리 보고(MAX), 조향각이 클수록(1.0) 짧게 봄(MIN)
+                dynamic_lookahead_distance = self.MAX_LOOKAHEAD_DISTANCE - (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * normalized_steer
                 
                 for y_bev in range(self.bev_h - 1, -1, -1):
                     x_bev = np.polyval(final_center_coeff, y_bev)
