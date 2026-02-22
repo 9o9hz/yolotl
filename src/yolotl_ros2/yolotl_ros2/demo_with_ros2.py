@@ -28,8 +28,6 @@ from geometry_msgs.msg import PoseStamped
 from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
 
-# [핵심] CvBridge 사용 안 함 (NumPy 버전 충돌 원천 봉쇄)
-
 # ==============================================================================
 # 유틸리티 함수
 # ==============================================================================
@@ -117,9 +115,15 @@ class LaneFollowerNode(Node):
         self.SMOOTHING_ALPHA = 0.6 
         self.MAX_LANE_AGE = 7 
         self.L = 0.73
+        
         self.THROTTLE_MIN, self.THROTTLE_MAX = 0.4, 0.6
-        self.MIN_LOOKAHEAD_DISTANCE, self.MAX_LOOKAHEAD_DISTANCE = 1.75, 2.35
         self.current_throttle = self.THROTTLE_MIN
+
+        # [디벨롭 적용] 동적 LD 및 조향각 제한 관련 파라미터
+        self.MIN_LOOKAHEAD_DISTANCE = 1.0  # 직진 시 사용할 최소 LD
+        self.MAX_LOOKAHEAD_DISTANCE = 2.5  # 최대 커브 시 사용할 최대 LD
+        self.MAX_STEER_DEG = 25.0          # 최대 조향각 제한 (도 단위)
+        self.prev_steer_deg = 0.0          # 이전 프레임 조향각 저장 변수
 
         # 4. ROS Setup
         self.pub_steering = self.create_publisher(Float32, 'auto_steer_angle_lane', 1)
@@ -127,7 +131,6 @@ class LaneFollowerNode(Node):
         self.pub_path = self.create_publisher(Path, 'lane_path', 10)
         self.pub_drivable_area = self.create_publisher(CompressedImage, 'drivable_area', 10)
         
-        # [통신] QoS 설정 적용 (카메라 연결 문제 해결)
         if 'compressed' in self.opt.topic:
             self.msg_type = CompressedImage
         else:
@@ -141,7 +144,6 @@ class LaneFollowerNode(Node):
         )
         self.sub_throttle = self.create_subscription(Float32, 'auto_throttle', self.throttle_callback, 1)
 
-        # [시각화] 창 크기 자동 조절 (여백 제거)
         cv2.namedWindow("Original Camera View", cv2.WINDOW_AUTOSIZE)
         cv2.namedWindow("Roboflow Detections (on BEV)", cv2.WINDOW_AUTOSIZE)
         cv2.namedWindow("Final Path & Logs (on BEV)", cv2.WINDOW_AUTOSIZE)
@@ -152,16 +154,13 @@ class LaneFollowerNode(Node):
         self.current_throttle = np.clip(msg.data, self.THROTTLE_MIN, self.THROTTLE_MAX)
 
     def do_bev_transform(self, image):
-        # 파라미터 파일에 저장된 좌표 그대로 변환 (고해상도 대응)
         M = cv2.getPerspectiveTransform(self.bev_params['src_points'], self.bev_params['dst_points'])
         return cv2.warpPerspective(image, M, (self.bev_w, self.bev_h), flags=cv2.INTER_LINEAR)
 
     def draw_lanes_on_original(self, image, left_coeff, right_coeff, center_coeff):
-        # 역변환 행렬 (dst -> src)
         M_inv = cv2.getPerspectiveTransform(self.bev_params['dst_points'], self.bev_params['src_points'])
         draw_img = image.copy()
 
-        # [수정] 주행 영역(Drivable Area) 시각화 (단일 차선 보정 포함)
         LANE_WIDTH_M = 1.5
         lane_width_pixels = LANE_WIDTH_M / self.m_per_pixel_x
 
@@ -180,36 +179,29 @@ class LaneFollowerNode(Node):
             left_xs = np.polyval(viz_left, ys)
             right_xs = np.polyval(viz_right, ys)
 
-            # BEV 좌표계에서 폴리곤 구성 (왼쪽 라인 -> 오른쪽 라인 역순)
             pts_left = np.stack([left_xs, ys], axis=1)
             pts_right = np.stack([right_xs, ys], axis=1)
             pts_bev = np.vstack([pts_left, pts_right[::-1]])
 
-            # 원본 이미지 좌표계로 변환
             pts_bev = np.array([pts_bev], dtype=np.float32)
             pts_orig = cv2.perspectiveTransform(pts_bev, M_inv)
 
-            # 반투명 오버레이 (초록색)
             overlay = draw_img.copy()
             cv2.fillPoly(overlay, [np.int32(pts_orig)], (0, 255, 0))
             cv2.addWeighted(overlay, 0.3, draw_img, 0.7, 0, draw_img)
 
         def transform_and_draw(coeff, color):
             if coeff is None: return
-            # BEV 상의 y좌표들 (0 ~ bev_h)
             ys = np.linspace(0, self.bev_h - 1, num=100)
             xs = np.polyval(coeff, ys)
             
-            # (1, N, 2) 형태의 점들
             pts_bev = np.array([np.stack([xs, ys], axis=1)], dtype=np.float32)
             pts_orig = cv2.perspectiveTransform(pts_bev, M_inv)
-            
-            # pts_orig[0]는 (N, 2) 형태
             cv2.polylines(draw_img, [np.int32(pts_orig)[0]], False, color, 3)
 
-        transform_and_draw(left_coeff, (255, 0, 0))   # Blue
-        transform_and_draw(right_coeff, (0, 0, 255))  # Red
-        transform_and_draw(center_coeff, (0, 255, 0)) # Green
+        transform_and_draw(left_coeff, (255, 0, 0))   
+        transform_and_draw(right_coeff, (0, 0, 255))  
+        transform_and_draw(center_coeff, (0, 255, 0)) 
         return draw_img
 
     def image_to_vehicle(self, pt_bev):
@@ -227,15 +219,11 @@ class LaneFollowerNode(Node):
                 self.get_logger().info(f"[Alive] Compressed Image Received")
 
         try:
-            # [변환] CvBridge 대신 NumPy 수동 변환 (NumPy 2.x 충돌 방지)
             np_arr = np.frombuffer(msg.data, dtype=np.uint8)
             
             if self.msg_type == Image:
-                # YUYV (2 bytes/pixel)
                 if np_arr.size == (msg.width * msg.height * 2): 
                     img = cv2.cvtColor(np_arr.reshape((msg.height, msg.width, 2)), cv2.COLOR_YUV2BGR_YUYV)
-                
-                # RGB8/BGR8 (3 bytes/pixel)
                 elif np_arr.size == (msg.width * msg.height * 3):
                     img = np_arr.reshape((msg.height, msg.width, 3))
                     if 'rgb' in msg.encoding.lower(): 
@@ -243,26 +231,22 @@ class LaneFollowerNode(Node):
                 else:
                     img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             else:
-                # CompressedImage
                 img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             
             if img is None: return
-
-            # [중요] Resize 없음! 원본 해상도 그대로 사용
             self.process_image(np.ascontiguousarray(img))
 
         except Exception as e:
             self.get_logger().error(f"Manual Decode Error: {e}")
 
     def process_image(self, im0s):
-        # 변수 안전 초기화
         steer_deg = None
         goal_point_bev = None
         final_left_coeff = None
         final_right_coeff = None
         lane_detected_bool = False
+        dynamic_lookahead_distance = self.MIN_LOOKAHEAD_DISTANCE # 초기화
         
-        # 화면 초기화 (plot 실패 대비)
         annotated_frame = im0s.copy() 
 
         # 1. BEV Transform
@@ -384,18 +368,30 @@ class LaneFollowerNode(Node):
                     path_msg.poses.append(pose)
                 self.pub_path.publish(path_msg)
 
-                throttle_range = self.THROTTLE_MAX - self.THROTTLE_MIN
-                normalized_throttle = (self.current_throttle - self.THROTTLE_MIN) / throttle_range if throttle_range > 0 else 0.0
-                dynamic_lookahead_distance = self.MIN_LOOKAHEAD_DISTANCE + (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * normalized_throttle
+                # ====================================================================
+                # [디벨롭 적용 완료] 이전 프레임 조향각에 따른 동적 LD 계산 로직
+                # ====================================================================
+                # 1. 이전 프레임 조향각 절댓값을 0.0(직진) ~ 1.0(최대 조향) 비율로 변환
+                normalized_steer = min(abs(self.prev_steer_deg) / self.MAX_STEER_DEG, 1.0)
+                
+                # 2. 직진일수록(0.0) 작게, 조향각이 클수록(1.0) 크게 계산 (요청사항 반영)
+                dynamic_lookahead_distance = self.MIN_LOOKAHEAD_DISTANCE + (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * normalized_steer
                 
                 for y_bev in range(self.bev_h - 1, -1, -1):
                     x_bev = np.polyval(final_center_coeff, y_bev)
                     x_veh, y_veh_right = self.image_to_vehicle((x_bev, y_bev))
                     dist = sqrt(x_veh**2 + y_veh_right**2)
+                    
                     if dist >= dynamic_lookahead_distance:
                         goal_point_bev = (int(x_bev), int(y_bev))
                         steer_rad = atan2(2.0 * self.L * y_veh_right, x_veh**2 + y_veh_right**2)
-                        steer_deg = np.clip(-degrees(steer_rad), -25.0, 25.0)
+                        
+                        # [제한 추가] 최대 조향각 25도로 제한 (클리핑)
+                        steer_deg = np.clip(-degrees(steer_rad), -self.MAX_STEER_DEG, self.MAX_STEER_DEG)
+                        
+                        # [핵심] 다음 프레임 LD 계산을 위해 현재 조향각 기억
+                        self.prev_steer_deg = steer_deg
+                        
                         self.pub_steering.publish(Float32(data=steer_deg))
                         break
 
@@ -413,14 +409,22 @@ class LaneFollowerNode(Node):
         if goal_point_bev is not None:
             cv2.circle(bev_im_for_drawing, goal_point_bev, 10, (0, 255, 255), -1)
 
+        # ====================================================================
+        # [디벨롭 적용 완료] LD 반경 시각화 (BEV 화면 하단 중앙 기준 반원)
+        # ====================================================================
+        if lane_detected_bool:
+            origin_pt = (int(self.bev_w / 2), self.bev_h - 1) # 차량 중심 위치
+            # 미터 단위 거리를 픽셀 단위 반경으로 변환
+            radius_px = int(dynamic_lookahead_distance / self.m_per_pixel_y)
+            # 조향에 따라 크기가 변하는 하얀색 원 시각화
+            cv2.circle(bev_im_for_drawing, origin_pt, radius_px, (255, 255, 255), 2)
+
         steer_text = f"Steer: {steer_deg:.1f} deg" if steer_deg is not None else "Steer: N/A"
         cv2.putText(bev_im_for_drawing, steer_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.putText(bev_im_for_drawing, f"Lane Detected: {lane_detected_bool}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         
-        throttle_range = self.THROTTLE_MAX - self.THROTTLE_MIN
-        norm_thr = (self.current_throttle - self.THROTTLE_MIN) / throttle_range if throttle_range > 0 else 0.0
-        viz_lookahead = self.MIN_LOOKAHEAD_DISTANCE + (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * norm_thr
-        cv2.putText(bev_im_for_drawing, f"Lookahead: {viz_lookahead:.2f}m", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        # Lookahead 텍스트도 동적으로 바뀐 수치를 바로 표시하도록 수정
+        cv2.putText(bev_im_for_drawing, f"Lookahead: {dynamic_lookahead_distance:.2f}m", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.putText(bev_im_for_drawing, f"Throttle: {self.current_throttle:.2f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
         # 원본 화면에 역변환된 차선 표시
@@ -445,13 +449,10 @@ def main(args=None):
     rclpy.init(args=args)
     parser = argparse.ArgumentParser()
     
-   
     package_share_directory = get_package_share_directory('yolotl_ros2')
     default_weights = os.path.join(package_share_directory, 'config', 'weights3.pt')
-    # 만약 config 폴더에 넣은 파일 이름이 'bev_params_manual.npz' 라면:
-    default_params = os.path.join(package_share_directory, 'config', 'bev_params_manual.npz')
+    default_params = os.path.join(package_share_directory, 'config', 'bev_params_4.npz')
     
-    # 사용자가 직접 경로를 지정할 수 있도록 옵션은 유지
     parser.add_argument('--weights', default=default_weights, help='Path to model weights')
     parser.add_argument('--param-file', default=default_params, help='Path to BEV parameters file')
     parser.add_argument('--img-size', type=int, default=640)
