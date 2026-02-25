@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/user/bin/env python3
 # -*- coding: utf-8 -*-
 
 import sys
@@ -19,10 +19,7 @@ from rclpy.qos import qos_profile_sensor_data
 from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
 
-# Conda 라이브러리 충돌 방지
-if 'CONDA_PREFIX' in os.environ:
-    conda_site = glob.glob(os.path.join(os.environ['CONDA_PREFIX'], 'lib', 'python*', 'site-packages'))
-    if conda_site: sys.path.insert(0, conda_site[0])
+
 
 # ==============================================================================
 # 유틸리티 함수 (ROS 1 코드 100% 동일)

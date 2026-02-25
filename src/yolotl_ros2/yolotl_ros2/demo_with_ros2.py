@@ -1,16 +1,11 @@
-#!/usr/bin/env python3
+#!/user/bin/env python3
 # -*- coding: utf-8 -*-
 
 import sys
 import os
 import glob
 
-# [1] Conda 환경 라이브러리 경로 우선순위 설정 (NumPy 충돌 방지)
-if 'CONDA_PREFIX' in os.environ:
-    conda_site = glob.glob(os.path.join(os.environ['CONDA_PREFIX'], 'lib', 'python*', 'site-packages'))
-    if conda_site: 
-        sys.path.insert(0, conda_site[0])
-        print(f"[System] Conda path added: {conda_site[0]}")
+
 
 import numpy as np
 import cv2
