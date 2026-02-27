@@ -126,13 +126,27 @@ class LaneFollowerNode(Node):
         self.MAX_STEER_DEG = 25.0          # 최대 조향각 제한 (도 단위)
         self.prev_steer_deg = 0.0          # 이전 프레임 조향각 저장 변수
 
+        # =============================================================================
+        # ✅ LD & Steering 디벨롭 파라미터/상태
+        # 1) 곡률 기반 LD (2차항 a 사용)
+        self.CURV_A_REF = 1e-4             # 경험적으로 튜닝 (값이 클수록 곡률에 덜 민감 -> LD 변화폭 감소)
+        # 2) 속도(Throttle) 혼합 가중치
+        self.W_CURVE = 0.7                 
+        self.W_SPEED = 0.3                 
+        # 3) LD EMA 필터
+        self.LD_ALPHA = 0.7                # 0~1 (높을수록 새값 빨리 반영)
+        self.ld_filtered = self.MAX_LOOKAHEAD_DISTANCE
+        # 4) 조향각 변화율 제한
+        self.MAX_STEER_RATE = 6.0          # deg/frame (FPS에 따라 튜닝)
+        # =============================================================================
+
         # 4. ROS Setup
         self.pub_steering = self.create_publisher(Float32, 'auto_steer_angle_lane', 1)
         self.pub_lane_status = self.create_publisher(Bool, 'lane_detection_status', 1)
         self.pub_path = self.create_publisher(Path, 'lane_path', 10)
         self.pub_drivable_area = self.create_publisher(CompressedImage, 'drivable_area', 10)
 
-        # ✅ [추가] Lookahead Distance 발행 토픽
+        # Lookahead Distance 발행 토픽
         self.pub_lookahead = self.create_publisher(Float32, 'lookahead_distance', 1)
 
         if 'compressed' in self.opt.topic:
@@ -252,7 +266,7 @@ class LaneFollowerNode(Node):
         final_right_coeff = None
         lane_detected_bool = False
 
-        # ✅ lookahead 기본값 (차선 없을 때는 -1.0 발행할 거라서 여기선 임시)
+        # ✅ lookahead 기본값 (차선 없을 때는 -1.0 발행, 임시)
         dynamic_lookahead_distance = self.MIN_LOOKAHEAD_DISTANCE
 
         annotated_frame = im0s.copy()
@@ -397,12 +411,23 @@ class LaneFollowerNode(Node):
                 self.pub_path.publish(path_msg)
 
                 # ====================================================================
-                # 동적 LD 계산
+                # ✅  동적 LD 계산 + LD EMA + steer rate limit
                 # ====================================================================
-                normalized_steer = min(abs(self.prev_steer_deg) / self.MAX_STEER_DEG, 1.0)
-                dynamic_lookahead_distance = self.MAX_LOOKAHEAD_DISTANCE - (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * normalized_steer
+                a = abs(final_center_coeff[0])
+                curv_norm = np.clip(a / (self.CURV_A_REF + 1e-12), 0.0, 1.0)
+                LD_curve = self.MAX_LOOKAHEAD_DISTANCE - (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * curv_norm
 
-                # ✅ [추가] Lookahead 토픽 발행 (차선/센터경로 유효할 때)
+                v_norm = (self.current_throttle - self.THROTTLE_MIN) / (self.THROTTLE_MAX - self.THROTTLE_MIN + 1e-6)
+                v_norm = np.clip(v_norm, 0.0, 1.0)
+                LD_speed = self.MIN_LOOKAHEAD_DISTANCE + (self.MAX_LOOKAHEAD_DISTANCE - self.MIN_LOOKAHEAD_DISTANCE) * v_norm
+
+                LD_target = self.W_CURVE * LD_curve + self.W_SPEED * LD_speed
+                LD_target = float(np.clip(LD_target, self.MIN_LOOKAHEAD_DISTANCE, self.MAX_LOOKAHEAD_DISTANCE))
+
+                self.ld_filtered = self.LD_ALPHA * LD_target + (1.0 - self.LD_ALPHA) * self.ld_filtered
+                dynamic_lookahead_distance = float(np.clip(self.ld_filtered, self.MIN_LOOKAHEAD_DISTANCE, self.MAX_LOOKAHEAD_DISTANCE))
+
+                # ✅ Lookahead 토픽 발행 (차선/센터경로 유효할 때)
                 self.pub_lookahead.publish(Float32(data=float(dynamic_lookahead_distance)))
 
                 for y_bev in range(self.bev_h - 1, -1, -1):
@@ -414,16 +439,20 @@ class LaneFollowerNode(Node):
                         goal_point_bev = (int(x_bev), int(y_bev))
                         steer_rad = atan2(2.0 * self.L * y_veh_right, x_veh**2 + y_veh_right**2)
 
-                        steer_deg = np.clip(-degrees(steer_rad), -self.MAX_STEER_DEG, self.MAX_STEER_DEG)
+                        raw_steer_deg = float(np.clip(-degrees(steer_rad), -self.MAX_STEER_DEG, self.MAX_STEER_DEG))
 
-                        # 다음 프레임 LD 계산을 위해 현재 조향각 기억
+                        # 4) steer rate limit (deg/frame)
+                        delta = np.clip(raw_steer_deg - self.prev_steer_deg, -self.MAX_STEER_RATE, self.MAX_STEER_RATE)
+                        steer_deg = float(self.prev_steer_deg + delta)
+
+                        # 다음 프레임을 위해 저장
                         self.prev_steer_deg = steer_deg
 
                         self.pub_steering.publish(Float32(data=steer_deg))
                         break
 
         else:
-            # ✅ [추가] 차선 미검출 시 lookahead를 -1.0 으로 발행(수신측에서 "invalid" 처리 가능)
+            # ✅ 차선 미검출 시 lookahead를 -1.0 으로 발행(수신측에서 "invalid" 처리 가능)
             self.pub_lookahead.publish(Float32(data=-1.0))
 
         # 7. Visualization
@@ -454,7 +483,7 @@ class LaneFollowerNode(Node):
         cv2.putText(bev_im_for_drawing, steer_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.putText(bev_im_for_drawing, f"Lane Detected: {lane_detected_bool}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-        # Lookahead 텍스트 (미검출이면 -1.00으로 찍힘)
+        # Lookahead 텍스트 (미검출이면 -1.00)
         cv2.putText(bev_im_for_drawing, f"Lookahead: {dynamic_lookahead_distance:.2f}m", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.putText(bev_im_for_drawing, f"Throttle: {self.current_throttle:.2f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
