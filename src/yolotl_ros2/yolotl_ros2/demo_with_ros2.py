@@ -21,6 +21,9 @@ from geometry_msgs.msg import PoseStamped
 from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
 
+# ✅ 추가
+from cv_bridge import CvBridge
+
 # ==============================================================================
 # 유틸리티 함수
 # ==============================================================================
@@ -87,6 +90,9 @@ class LaneFollowerNode(Node):
         self.opt = opt
         self.get_logger().info("[Lane Follower] Initializing...")
 
+        # ✅ cv_bridge
+        self.bridge = CvBridge()
+
         # 1. 모델 로드
         device_str = self.opt.device
         if device_str.isdigit() and torch.cuda.is_available():
@@ -121,25 +127,20 @@ class LaneFollowerNode(Node):
         self.current_throttle = self.THROTTLE_MIN
 
         # [디벨롭 적용] 동적 LD 및 조향각 제한 관련 파라미터
-        self.MIN_LOOKAHEAD_DISTANCE = 1.0  # 최대 커브 시 사용할 최소 LD
-        self.MAX_LOOKAHEAD_DISTANCE = 2.0  # 직진 시 사용할 최대 LD
-        self.MAX_STEER_DEG = 25.0          # 최대 조향각 제한 (도 단위)
-        self.prev_steer_deg = 0.0          # 이전 프레임 조향각 저장 변수
+        self.MIN_LOOKAHEAD_DISTANCE = 1.0
+        self.MAX_LOOKAHEAD_DISTANCE = 2.0
+        self.MAX_STEER_DEG = 25.0
+        self.prev_steer_deg = 0.0
 
         # =============================================================================
         # ✅ LD & Steering 디벨롭 파라미터/상태
-        # 1) 곡률 기반 LD (2차항 a 사용)
-        self.CURV_A_REF = 1e-4             # 경험적으로 튜닝 (값이 클수록 곡률에 덜 민감 -> LD 변화폭 감소)
-        # 2) 속도(Throttle) 혼합 가중치
+        self.CURV_A_REF = 1e-4
         self.W_CURVE = 0.7
         self.W_SPEED = 0.3
-        # 3) LD EMA 필터
-        self.LD_ALPHA = 0.7                # 0~1 (높을수록 새값 빨리 반영)
+        self.LD_ALPHA = 0.7
         self.ld_filtered = self.MAX_LOOKAHEAD_DISTANCE
-        # 4) 조향각 변화율 제한
-        self.MAX_STEER_RATE = 6.0          # deg/frame (FPS에 따라 튜닝)
+        self.MAX_STEER_RATE = 6.0
 
-        # 미검출 시에도 직전 LD 유지 발행
         self.last_valid_ld = float(self.MAX_LOOKAHEAD_DISTANCE)
         # =============================================================================
 
@@ -148,10 +149,9 @@ class LaneFollowerNode(Node):
         self.pub_lane_status = self.create_publisher(Bool, 'lane_detection_status', 1)
         self.pub_path = self.create_publisher(Path, 'lane_path', 10)
         self.pub_drivable_area = self.create_publisher(CompressedImage, 'drivable_area', 10)
-
-        # Lookahead Distance 발행 토픽
         self.pub_lookahead = self.create_publisher(Float32, 'lookahead_distance', 1)
 
+        # ✅ topic이 compressed면 CompressedImage, 아니면 Image
         if 'compressed' in self.opt.topic:
             self.msg_type = CompressedImage
         else:
@@ -232,35 +232,29 @@ class LaneFollowerNode(Node):
         y_vehicle = (self.bev_w / 2 - u) * self.m_per_pixel_x
         return x_vehicle, y_vehicle
 
+    # ✅ 여기만 바뀜: raw(Image)는 cv_bridge로 무조건 bgr8로 받음
     def image_callback(self, msg):
         self.frame_count += 1
         if self.frame_count % 60 == 0:
             if self.msg_type == Image:
-                self.get_logger().info(f"[Alive] Image Size: {msg.width}x{msg.height}")
+                self.get_logger().info(f"[Alive] Image Size: {msg.width}x{msg.height}, enc={msg.encoding}")
             else:
-                self.get_logger().info(f"[Alive] Compressed Image Received")
+                self.get_logger().info(f"[Alive] Compressed Image Received, format={msg.format}")
 
         try:
-            np_arr = np.frombuffer(msg.data, dtype=np.uint8)
-
             if self.msg_type == Image:
-                if np_arr.size == (msg.width * msg.height * 2):
-                    img = cv2.cvtColor(np_arr.reshape((msg.height, msg.width, 2)), cv2.COLOR_YUV2BGR_YUYV)
-                elif np_arr.size == (msg.width * msg.height * 3):
-                    img = np_arr.reshape((msg.height, msg.width, 3))
-                    if 'rgb' in msg.encoding.lower():
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                else:
-                    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             else:
+                np_arr = np.frombuffer(msg.data, dtype=np.uint8)
                 img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
             if img is None:
                 return
+
             self.process_image(np.ascontiguousarray(img))
 
         except Exception as e:
-            self.get_logger().error(f"Manual Decode Error: {e}")
+            self.get_logger().error(f"Decode Error: {e}")
 
     def process_image(self, im0s):
         steer_deg = None
@@ -269,7 +263,6 @@ class LaneFollowerNode(Node):
         final_right_coeff = None
         lane_detected_bool = False
 
-        # ✅ 기본 표시용(초기값). 실제 publish는 last_valid_ld 기준으로 나감.
         dynamic_lookahead_distance = self.last_valid_ld
 
         annotated_frame = im0s.copy()
@@ -430,7 +423,6 @@ class LaneFollowerNode(Node):
                 self.ld_filtered = self.LD_ALPHA * LD_target + (1.0 - self.LD_ALPHA) * self.ld_filtered
                 dynamic_lookahead_distance = float(np.clip(self.ld_filtered, self.MIN_LOOKAHEAD_DISTANCE, self.MAX_LOOKAHEAD_DISTANCE))
 
-                # ✅ "유효 LD" 저장 + 항상 발행 
                 self.last_valid_ld = float(dynamic_lookahead_distance)
                 self.pub_lookahead.publish(Float32(data=float(self.last_valid_ld)))
 
@@ -445,24 +437,17 @@ class LaneFollowerNode(Node):
 
                         raw_steer_deg = float(np.clip(-degrees(steer_rad), -self.MAX_STEER_DEG, self.MAX_STEER_DEG))
 
-                        # 4) steer rate limit (deg/frame)
                         delta = np.clip(raw_steer_deg - self.prev_steer_deg, -self.MAX_STEER_RATE, self.MAX_STEER_RATE)
                         steer_deg = float(self.prev_steer_deg + delta)
 
-                        # 다음 프레임을 위해 저장
                         self.prev_steer_deg = steer_deg
 
                         self.pub_steering.publish(Float32(data=steer_deg))
                         break
-
             else:
-                # ✅ lane_detected_bool은 True지만 center_path가 None인 경우:
-                #    LD는 직전값 유지로 계속 발행
                 dynamic_lookahead_distance = float(self.last_valid_ld)
                 self.pub_lookahead.publish(Float32(data=float(self.last_valid_ld)))
-
         else:
-            # ✅ 차선 미검출:직전 LD 유지 발행
             dynamic_lookahead_distance = float(self.last_valid_ld)
             self.pub_lookahead.publish(Float32(data=float(self.last_valid_ld)))
 
@@ -480,7 +465,6 @@ class LaneFollowerNode(Node):
         if goal_point_bev is not None:
             cv2.circle(bev_im_for_drawing, goal_point_bev, 10, (0, 255, 255), -1)
 
-        # LD 반경 시각화
         if lane_detected_bool:
             y_offset_px = int(self.y_offset_m / self.m_per_pixel_y)
             true_origin_pt = (int(self.bev_w / 2), self.bev_h - 1 + y_offset_px)
@@ -494,14 +478,11 @@ class LaneFollowerNode(Node):
         cv2.putText(bev_im_for_drawing, steer_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.putText(bev_im_for_drawing, f"Lane Detected: {lane_detected_bool}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-        # Lookahead 텍스트 (항상 last_valid_ld 기반으로 유지됨)
         cv2.putText(bev_im_for_drawing, f"Lookahead: {dynamic_lookahead_distance:.2f}m", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.putText(bev_im_for_drawing, f"Throttle: {self.current_throttle:.2f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-        # 원본 화면에 역변환된 차선 표시
         original_with_lanes = self.draw_lanes_on_original(im0s, final_left_coeff, final_right_coeff, self.tracked_center_path['coeff'])
 
-        # [Publish] 주행 가능 영역 이미지 발행
         msg = CompressedImage()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "base_link"
@@ -530,7 +511,10 @@ def main(args=None):
     parser.add_argument('--conf-thres', type=float, default=0.6)
     parser.add_argument('--iou-thres', type=float, default=0.5)
     parser.add_argument('--device', default='0')
-    parser.add_argument('--topic', type=str, default='/image_raw/compressed', help='ROS 2 Image Topic')
+
+    # ✅ 기본 토픽을 raw로 변경
+    parser.add_argument('--topic', type=str, default='/image_raw', help='ROS 2 Image Topic')
+
     opt, _ = parser.parse_known_args()
 
     node = LaneFollowerNode(opt)

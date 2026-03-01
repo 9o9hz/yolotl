@@ -1,11 +1,10 @@
 
-#실행전
+
 ros2 run yolotl_ros2 lane_follower
 
 
-
 카메라/백파일 input
-ros2 run usb_cam usb_cam_node_exe --ros-args -p video_device:=/dev/video2 -p pixel_format:=yuyv2rgb
+ros2 run usb_cam usb_cam_node_exe --ros-args -p video_device:=/dev/video2
 ros2 bag play ~/Downloads/test13 -l
 
 
@@ -22,4 +21,8 @@ j:~$ ros2 topic list
 /lookahead_distance
 /parameter_events
 /rosout
-j:~$ 
+
+
+plothuggler 실행
+source /opt/ros/humble/setup.bash
+ros2 run plotjuggler plotjuggler
